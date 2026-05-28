@@ -3,9 +3,9 @@
 ## 1. 工作区根目录
 
 ```text
-Ethercat_R1/
+R1-Ethercat_4c/
 ├── src/                     ROS 2 源码包
-│   ├── linkx_soem_demo/     车辆主控（C++）+ ROS 2 遥控节点
+│   ├── linkx_soem_demo/     车辆主控（C++）+ FS-i6S iBus 遥控节点
 │   └── linkx_bringup/       launch / 启动编排包
 ├── build/                   colcon 中间产物（自动生成）
 ├── install/                 colcon 安装产物（自动生成）
@@ -24,7 +24,7 @@ linkx_soem_demo/
 ├── CMakeLists.txt           显式列源码避免误链多 main
 ├── package.xml
 ├── include/linkx_soem_demo/
-│   ├── remote/              手柄外设抽象（Logitech F710，XInput/DInput 自适应）
+│   ├── remote/              FS-i6S iBus 遥控器解析
 │   └── vehicle_control/
 │       ├── middleware/      SOEM / linkx 协议封装 / PID 算法 / 数学工具
 │       ├── device/          硬件驱动层（编码器/电机/EtherCAT/OPS）
@@ -35,7 +35,7 @@ linkx_soem_demo/
 │       ├── interaction/     机器人交互（指令组织 + ROS2 遥控桥）
 │       └── task/            任务调度（1ms / 2ms / 100ms 周期）
 ├── src/
-│   ├── remote/              ROS 2 遥控节点 + Logitech F710 解码
+│   ├── remote/              ROS 2 遥控节点 + FS-i6S iBus 解码
 │   ├── test_mains/          独立测试 main（见 06 文档）
 │   └── vehicle_control/     与 include/ 镜像的实现层
 ├── tests/                   纯软件单元测试（如 BRT 字节序）
@@ -51,7 +51,7 @@ linkx_soem_demo/
 | --- | --- | --- |
 | middleware | 协议栈 / 通用算法 | `soem/*.c`、`linkx/linkx.c`、`Algorithm/alg_pid.cpp`、`math/math.h` |
 | device | 硬件抽象 | `Motor/dvc_odrive.{h,cpp}`、`Motor/dvc_motor_dm.{h,cpp}`、`Motor/dvc_encoder.{h,cpp}`、`OPS/dvc_ops.{h,cpp}`、`ecat_manager/`、`linkx4c_handler/`、`rt_timing/` |
-| chariot/chassis | 底盘 + 舵向 | `chassis/crt_chassis.{h,cpp}` —— 4 舵轮运动学、drive_mode profile、`kWheelSpeedCalib`、输出端 slew。`chassis/steer_calibration.{h,cpp}` —— MIT 位置环 + slew + ω_des=0 + 滞回的找零序列。`chassis/encoder_persistence.{h,cpp}` —— `steer_zero_offsets.txt` / `steer_unwrapped_pulses.txt` 读写 + CRC32 |
+| chariot/chassis | 底盘 | 当前主可执行链接 `chassis/omni_wheel/crt_chassis.{h,cpp}` —— X 型 4 驱全向轮运动学、DJI 3508/C620 RPM 闭环与 OPS 接入。舵轮版 `chassis/steer_wheel/*` 仍保留，用于舵向调参、编码器持久化与相关测试程序 |
 | chariot/auto_pilot | 路径跟随 | `auto_pilot/dvc_auto_pilot.{h,cpp}` —— 拐角软化 `V = seg_speed × cos²(Δθ/2)`、smoothstep 进出窗口、方向 lerp、自动切 `Drive_Mode_SEMI_AUTO` |
 | chariot/clamp | 夹爪 | `clamp/crt_clamp.{h,cpp}` |
 | interaction | 上位整合 | `robot/robot.{h,cpp}` —— 子系统聚合 + 周期回调 + ROS2 遥控桥（手动模式 cmd_omega 直接透传，无航向纠偏） |
@@ -60,15 +60,15 @@ linkx_soem_demo/
 ### 2.2 主程序入口
 
 - `vehicle_control/main.cpp`：`linkx_soem_demo` 可执行，命令行第一个参数为网卡名（默认 `enp86s0`），调用 `Robot_Control_Loop()` 阻塞运行直到 `SIGINT/SIGTERM`。
-- `remote/remote_node.cpp`：`remote_node_cpp` 可执行，`/joy` → `/cmd_vel + /robot_buttons`。
+- `remote/FSI6S/remote_node.cpp`：`remote_node_cpp` 可执行，读取 `/dev/rc_receiver` iBus 串口并发布 `/cmd_vel`、`/robot_buttons`、`/remote_vra`。
 
 ## 3. `linkx_bringup` 包
 
 ```text
 linkx_bringup/
 ├── launch/
-│   ├── full_system.launch.py    主启动文件：joy + remote + vehicle_control
-│   └── teleop.launch.py         仅遥控链路（不带车体）
+│   ├── full_system.launch.py    主启动文件：remote + vehicle_control
+│   └── teleop.launch.py         仅 FS-i6S 遥控链路（不带车体）
 ├── config/
 │   ├── teleop.params.yaml       预留 ROS 2 参数文件
 │   └── fastrtps_profiles.xml    Fast DDS 配置（避免默认 XML 报错）
@@ -81,12 +81,13 @@ linkx_bringup/
 | --- | --- | --- |
 | `ifname` | `enp86s0` | EtherCAT 网卡 |
 | `start_vehicle_control` | `true` | 是否启动车体主控（false 时只跑遥控链路） |
-| `vehicle_prefix` | `""` | 主控前缀（用于 `sudo -E env ...`） |
+| `serial_port` | `/dev/rc_receiver` | FS-i6S iBus 串口 |
+| `vehicle_prefix` | `""` | 主控前缀 |
 | `ros_nodes_prefix` | `""` | 全部 ROS 节点前缀 |
 
-> ⚠️ 2026-05-18 起 launch 不再声明 `max_speed` 参数。遥控最大线速度的唯一权威源是
-> `src/linkx_soem_demo/src/remote/remote_node.cpp` 的 `declare_parameter("max_speed", ...)`。
-> 想改默认速度直接动 C++ 代码 + rebuild；运行时仍可 `ros2 param set /remote_node max_speed <v>` 临时改。
+当前不使用 `joy_node`，iBus 遥控链路不经过 `/joy`。`max_speed`、`max_omega`、`deadzone` 等默认值在
+`src/linkx_soem_demo/src/remote/FSI6S/remote_node.cpp` 的 `declare_parameter` 中声明；运行时可用
+`ros2 param set /remote_node <param> <value>` 临时调整。
 
 ## 4. `tools/` 调试脚本
 

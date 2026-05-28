@@ -5,7 +5,7 @@
 | 路径 | 用途 |
 | --- | --- |
 | `start_full_system.sh` | 工程根目录推荐入口（colcon build + launch） |
-| `src/linkx_soem_demo/launch/run_link.sh` | 包内启动脚本（兼容旧用法） |
+| `src/linkx_soem_demo/launch/run_link.sh` | 包内旧兼容脚本，可能与当前 launch 参数不同步 |
 | `src/linkx_soem_demo/run_link.sh` | 包根的转发壳，最终调 launch/run_link.sh |
 
 ## 2. `tools/` 标定与调参脚本
@@ -41,7 +41,7 @@ sudo ./tools/run_motor_calib.sh 0 inertia --inertia_t 0.5 --friction 0.05
 实时 ASCII 波形绘制（详见 [03_run_guide.md §7](03_run_guide.md)）。
 
 ```bash
-./start_full_system.sh --sudo --ifname enp86s0 2>&1 | \
+./start_full_system.sh --ifname enp86s0 2>&1 | \
 python3 tools/plot_feedback_wave.py \
   --series now_vx --series now_vy --series now_omega
 ```
@@ -107,7 +107,7 @@ ip -br link
 ip link show enp86s0
 ```
 
-### 4.3 给可执行文件加 capability（避免 `--sudo`）
+### 4.3 给可执行文件加 capability
 
 ```bash
 sudo setcap 'cap_net_raw,cap_net_admin+ep' \

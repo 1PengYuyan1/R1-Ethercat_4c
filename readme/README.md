@@ -1,104 +1,125 @@
-# Ethercat_R1
+# R1 EtherCAT-4C
 
-> 基于 EtherCAT + SOEM 的四舵轮全向底盘控制系统（ROS 2 Humble）
+> 基于 ROS 2 Humble、SOEM 与 LinkX / EtherCAT-4C 的 R1 底盘控制工程。
 
-本仓库实现：手柄遥控 → ROS 2 节点 → EtherCAT 主站 → EtherCAT-4C 网关 → 4 路 CAN 总线 → 4×ODrive 驱动轮 + 4×DM 舵向电机 + 4×BRT 多圈绝对编码器 + OPS-9 里程计。
+当前主程序配置为 **X 型四驱全向轮底盘**：FS-i6S iBus 遥控器经串口发布 ROS 2 指令，`vehicle_control` 通过 EtherCAT 主站驱动 LinkX / EtherCAT-4C 网关，再经 CAN 控制 4 个 DJI 3508 / C620 驱动轮，并接入 OPS-9 里程计。
 
-主进程 1 ms 周期闭环，关键特性：
-
-- **舵向编码器虚拟无限位移 + 掉电恢复**：断电后无需重新找零即可恢复角度参考
-- **舵向 DM 内置 MIT 位置环**：mit_kp=50 / kd=1.5 + 软件 slew 500°/s + 滞回，60°~90° step 800ms settled、±0.1° 静差
-- **drive_mode 双档 profile**：`MANUAL`（slew 500°/s、LPF α=0.3，遥控用）/ `SEMI_AUTO`（slew 200°/s、α=0.15，路径跟随用）由 auto_pilot 自动切换
-- **Auto_Pilot 拐角软化**：`V = seg_speed × cos²(Δθ/2)` + smoothstep 进出窗口，方向 lerp 与速度共用同一权重，避免拐角 steer 跟不上
-- **4 轮速度标定**：编译期 `kWheelSpeedCalib[4]` 在 `Set_target_omega` 边界一次乘进，消除 4 轮稳态 ~1.5% 偏差导致的前进 yaw 漂
-- **F710 trigger 速度缩放**：RT 加速 / LT 减速，`scale = 0.65 + (rt-lt)×0.35`，钳位 `[0.30, 1.00]`
-
----
+旧的四舵轮代码、舵向编码器持久化、DM 舵向电机标定与相关测试程序仍保留在仓库中，主要用于调试、回归或切回舵轮方案；当前一键启动路径以 `omni_wheel` 实现为准。
 
 ## 文档导航
 
 | 文件 | 内容 |
 | --- | --- |
-| [01_structure.md](01_structure.md) | 工作区与代码目录结构、各模块职责 |
-| [02_quickstart.md](02_quickstart.md) | 最小可执行步骤（编译 + 启动） |
-| [03_run_guide.md](03_run_guide.md) | 完整运行指南、启动参数、注意事项 |
-| [04_steer_encoder.md](04_steer_encoder.md) | 舵向编码器虚拟无限位移 + 掉电恢复 |
-| [05_calibration.md](05_calibration.md) | 电机/底盘标定流程 |
-| [06_test_executables.md](06_test_executables.md) | 各类测试可执行程序 |
-| [07_tools.md](07_tools.md) | 调试脚本与波形/曲线绘制 |
+| [01_structure.md](01_structure.md) | 工作区、包结构与模块职责 |
+| [02_quickstart.md](02_quickstart.md) | 最小可执行步骤：环境检查、编译、启动 |
+| [03_run_guide.md](03_run_guide.md) | 完整运行指南、launch 参数、权限模型 |
+| [04_steer_encoder.md](04_steer_encoder.md) | 舵轮方案的编码器虚拟无限位移与掉电恢复 |
+| [05_calibration.md](05_calibration.md) | 舵轮 / 电机 / 底盘标定流程 |
+| [06_test_executables.md](06_test_executables.md) | 测试与诊断可执行程序 |
+| [07_tools.md](07_tools.md) | 调试脚本、曲线绘制与分析工具 |
 | [08_troubleshooting.md](08_troubleshooting.md) | 常见故障排查 |
 
----
+## 快速开始
+
+```bash
+cd /home/<你>/code/R1-Ethercat_4c
+./start_full_system.sh --ifname enp86s0
+```
+
+脚本会完成：
+
+1. 创建并清空 `var_data/live_variables.log`，导出 `VAR_DATA_DIR` / `VAR_DATA_FILE`。
+2. 检查 `/opt/ros/humble/setup.bash` 并 source ROS 2 Humble。
+3. 检查 EtherCAT 网卡，必要时通过 `sudo ip link set <ifname> up` 拉起。
+4. `colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release`。
+5. 给主控真实二进制自动补 `cap_net_raw,cap_net_admin=eip`。
+6. 启动 `ros2 launch linkx_bringup full_system.launch.py ifname:=<ifname>`。
+
+## 运行拓扑
+
+```text
+FS-i6S receiver (/dev/rc_receiver, iBus 115200 8N1)
+        ↓
+remote_node_cpp
+        ├─ /cmd_vel
+        ├─ /robot_buttons
+        └─ /remote_vra
+        ↓
+vehicle_control (linkx_soem_demo)
+        ├─ SOEM EtherCAT master
+        ├─ LinkX / EtherCAT-4C
+        ├─ CAN ch0: 4 × DJI 3508 / C620
+        └─ CAN ch3: OPS-9
+```
+
+`full_system.launch.py` 默认启动两个节点：
+
+| 节点 | 可执行 | 作用 |
+| --- | --- | --- |
+| `remote_node` | `linkx_soem_demo/remote_node_cpp` | 读取 FS-i6S iBus 串口，发布 `/cmd_vel`、`/robot_buttons`、`/remote_vra` |
+| `vehicle_control` | `linkx_soem_demo/linkx_soem_demo` | EtherCAT 主站、底盘控制、硬件反馈处理 |
 
 ## 工程一览
 
 ```text
-Ethercat_R1/                       工作空间根（colcon workspace）
+R1-Ethercat_4c/
 ├── src/
-│   ├── linkx_soem_demo/           车辆主控（C++）：EtherCAT 主站 + 控制算法 + ROS2 节点
-│   │   └── src/vehicle_control/
-│   │       ├── chariot/
-│   │       │   ├── chassis/       4 舵轮运动学 + 编码器恢复 + 舵向校准（已抽离）
-│   │       │   ├── auto_pilot/    路径跟随 + 拐角软化 + drive_mode 切换
-│   │       │   └── clamp/         夹爪
-│   │       ├── device/            Motor / Encoder / OPS / ecat_manager / linkx4c_handler
-│   │       ├── interaction/       robot.cpp：子系统聚合 + ROS2 桥
-│   │       └── task/              task.cpp：1ms/2ms/100ms 周期调度
-│   └── linkx_bringup/             启动编排：joy / remote / vehicle_control 串起来
-├── tools/                         调试脚本（标定、扫参、波形打印）
-├── instructions/                  历史实施记录（标定卡死修复、编码器恢复步骤）
-├── var_data/                      运行时持久化数据 + 曲线 CSV/PNG + 分析脚本
-├── readme/                        本说明文档目录
-├── start_full_system.sh           一键启动脚本（推荐入口）
-├── build/ install/ log/           colcon 自动生成
-└── .claude/                       Claude Code 工作目录（settings/memory）
+│   ├── linkx_soem_demo/           主控包：EtherCAT、LinkX/CAN、底盘控制、遥控节点
+│   │   ├── src/remote/FSI6S/      FS-i6S iBus 串口遥控链路
+│   │   ├── src/vehicle_control/   控制主循环、设备层、底盘与任务调度
+│   │   └── src/test_mains/        独立硬件诊断 / 标定程序
+│   └── linkx_bringup/             launch 与启动编排
+├── tools/                         调试脚本与数据分析工具
+├── instructions/                  历史实施记录
+├── readme/                        项目文档
+├── start_full_system.sh           当前推荐的一键启动入口
+└── build/ install/ log/           colcon 自动生成目录
 ```
 
-## 系统组成
+## 关键文件
 
-### 软件栈
+| 路径 | 说明 |
+| --- | --- |
+| `start_full_system.sh` | 推荐启动脚本，仅接受 `--ifname <name>` |
+| `src/linkx_bringup/launch/full_system.launch.py` | 全系统 launch，参数包含 `ifname`、`serial_port`、`start_vehicle_control` |
+| `src/linkx_bringup/launch/teleop.launch.py` | 只启动 FS-i6S 遥控链路 |
+| `src/linkx_soem_demo/src/remote/FSI6S/remote_node.cpp` | iBus 串口读取、遥控参数默认值、失联安全态 |
+| `src/linkx_soem_demo/include/linkx_soem_demo/vehicle_control/3_Chariot/chassis/omni_wheel/crt_chassis.h` | 当前主控使用的全向轮底盘接口 |
+| `src/linkx_soem_demo/src/vehicle_control/3_Chariot/chassis/omni_wheel/crt_chassis.cpp` | 当前主控使用的全向轮运动学与 DJI 电流控制 |
 
-- **OS**：Ubuntu + ROS 2 Humble
-- **EtherCAT 主站**：SOEM（包内自带 `middleware/soem`），原始以太网，需要 `cap_net_raw` 或 `sudo`
-- **网关**：EtherCAT-4C，4 路 CAN（0/1/2/3）
-- **CAN 协议**：
-  - ODrive：CAN Simple（0..3 节点 ID）
-  - DM 电机：MIT 力矩控制
-  - BRT 编码器：自定义 0x01..0x0F 指令集
-  - OPS-9：通道 3 接收
+## 运行前检查
 
-### 节点拓扑（`linkx_bringup/full_system.launch.py`）
+- ROS 2 Humble 已安装：`ls /opt/ros/humble/setup.bash`。
+- EtherCAT 网卡独立专用，常用默认名为 `enp86s0`。
+- FS-i6S 接收机串口可用，默认 udev 软链为 `/dev/rc_receiver`。
+- `libpcap`、`colcon` 与 ROS 2 C++ 依赖已安装。
+- 现场确认车体离地或具备安全急停条件后再启动车体主控。
 
-```
-joy_node  →  /joy
-              ↓
-remote_node_cpp  →  /cmd_vel, /robot_buttons
-  ├─ XInput: RT/LT trigger 双键合成 scale ∈ [0.30, 1.00]
-  └─ max_speed 单点权威源（默认 declare_parameter，launch/脚本不再覆盖）
-                          ↓
-                  vehicle_control（linkx_soem_demo）
-                  ├─ 1ms EtherCAT 周期主循环
-                  ├─ 底盘解算（4 舵轮）+ drive_mode profile 切换
-                  ├─ Auto_Pilot 路径跟随（cos²(Δθ/2) 拐角软化）
-                  ├─ ODrive / DM / Encoder 驱动
-                  └─ 持久化（var_data/*.txt）
-```
-
-## 快速开始（最简）
+## 常用命令
 
 ```bash
-cd /home/<你>/code/Ethercat_R1
-./start_full_system.sh --sudo --ifname enp86s0
+# 编译
+source /opt/ros/humble/setup.bash
+colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release
+
+# 启动全系统
+./start_full_system.sh --ifname enp86s0
+
+# 只测遥控链路
+source install/setup.bash
+ros2 launch linkx_bringup teleop.launch.py serial_port:=/dev/rc_receiver
+
+# 全系统 launch，但不启动车体主控
+ros2 launch linkx_bringup full_system.launch.py \
+  ifname:=enp86s0 \
+  start_vehicle_control:=false \
+  serial_port:=/dev/rc_receiver
 ```
 
-详见 [02_quickstart.md](02_quickstart.md)。
+## 注意事项
 
-## 关键约束（先看再用）
-
-1. **EtherCAT 网卡必须独立专用**，不要混跑普通网络业务。
-2. **首次跑前需要标定**：舵向找零（`CAPTURE_STEER_ZERO=1`）+ DM 电机参数（`tools/run_motor_calib.sh`）+ ODrive 参数 + 4 轮速度标定 `kWheelSpeedCalib`（详见 [05_calibration.md](05_calibration.md)）。
-3. **断电恢复依赖 `var_data/steer_zero_offsets.txt` + `var_data/steer_unwrapped_pulses.txt`**，删除将丢失角度基准。
-4. **权限模型**：要么 `--sudo`，要么 `setcap 'cap_net_raw,cap_net_admin+ep' ...`。`/etc/sudoers.d/linkx-setcap` 已配 NOPASSWD，启动脚本会自动给真实 `build/` 二进制 `setcap`。
-5. **`var_data/*.txt` 文件 owner**：跑过 `sudo` 后会归 root，下次非 sudo 跑会报 `[CHASSIS][PERSIST-FAIL]`。切模式前 `chown` 一次。
-6. **速度默认值只剩一处**：`src/linkx_soem_demo/src/remote/remote_node.cpp` 的 `declare_parameter("max_speed", ...)`，launch 与启动脚本不再传 max_speed。改默认速度必须改 C++ 代码 + rebuild。
-7. **手动模式无航向纠偏**：cmd_omega 直接透传；稳态 yaw 漂靠 4 轮速度标定在底盘端吸收。半自动 / Auto_Pilot 路径才接 OPS。
+1. 根目录 `start_full_system.sh` 当前不再接受 `--sudo`、`--auto-ifname` 或 `--max-speed`。
+2. EtherCAT 原始以太网需要 `cap_net_raw` / `cap_net_admin`；启动脚本会在构建后自动对真实二进制执行 `setcap`，可能触发 sudo 密码输入。
+3. 遥控最大速度、角速度、死区默认值位于 `src/linkx_soem_demo/src/remote/FSI6S/remote_node.cpp` 的 `declare_parameter`；运行时可用 `ros2 param set /remote_node <param> <value>` 临时调整。
+4. `src/linkx_soem_demo/launch/run_link.sh` 是旧兼容入口，当前文档以根目录 `start_full_system.sh` 和 `linkx_bringup` launch 文件为准。
+5. `readme/04_steer_encoder.md`、`readme/05_calibration.md` 中大量内容针对舵轮方案；调试当前全向轮主路径时，优先看本文件、快速开始和运行指南。

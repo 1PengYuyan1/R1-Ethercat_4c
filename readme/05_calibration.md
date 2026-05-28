@@ -93,7 +93,7 @@ INERTIA: J=0.005638  alpha=81.495  T_step=0.5000  friction_used=0.0405  success=
 rm -f var_data/steer_unwrapped_pulses.txt
 export CAPTURE_STEER_ZERO=1
 export CAPTURE_STEER_ZERO_FORCE=1
-./start_full_system.sh --sudo --ifname enp86s0
+./start_full_system.sh --ifname enp86s0
 ```
 
 看到 `[TASK] steer zero calibration captured` 后停止，再 `unset` 环境变量正常启动。

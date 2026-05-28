@@ -7,7 +7,7 @@
 | 可执行 | 源文件 | 用途 | 是否需要硬件 |
 | --- | --- | --- | --- |
 | `linkx_soem_demo` | `vehicle_control/main.cpp` | 主程序入口（EtherCAT 1ms 主循环） | ✅ |
-| `remote_node_cpp` | `remote/remote_node.cpp` | 手柄 → ROS2 话题 | 仅手柄 |
+| `remote_node_cpp` | `remote/FSI6S/remote_node.cpp` | FS-i6S iBus 串口 → ROS2 话题 | 仅接收机 |
 | `can_link_test` | `test_mains/can_link_test_main.cpp` | EtherCAT-4C 4 路 CAN 发包能力验证 | ✅ |
 | `canfd_link_test` | `test_mains/canfd_link_test_main.cpp` | 双 LinkX (CAN-FD + classic) alias 绑定与 FD 发包验证 | ✅ |
 | `ops_test` | `test_mains/ops_test_main.cpp` | OPS-9 接收解码冒烟测试 | ✅ |

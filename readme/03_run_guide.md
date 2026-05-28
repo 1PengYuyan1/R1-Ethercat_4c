@@ -3,225 +3,158 @@
 ## 1. 推荐入口：`start_full_system.sh`
 
 ```bash
-cd /home/<你>/code/Ethercat_R1
-./start_full_system.sh --sudo --ifname enp86s0
+cd /home/<你>/code/R1-Ethercat_4c
+./start_full_system.sh --ifname enp86s0
 ```
 
 | 参数 | 默认 | 说明 |
 | --- | --- | --- |
 | `--ifname <name>` | `enp86s0` | EtherCAT 网卡名 |
-| `--auto-ifname` | 关 | 自动选第一块 `en*`/`eth*` 有线网卡 |
-| `--sudo` | 关 | 给车体主控前缀 `sudo -E env ...` 透传 ROS 环境 |
+| `-h` / `--help` | - | 打印帮助 |
 
-> 2026-05-18 起脚本不再接受 `--max-speed`。最大线速度由 `remote_node.cpp::declare_parameter`
-> 单点决定；改默认值动 C++，运行时改用 `ros2 param set /remote_node max_speed <v>`。
+根目录脚本当前不接受 `--sudo`、`--auto-ifname`、`--max-speed`。如果需要只启动遥控链路或关闭车体主控，直接使用 `linkx_bringup` 的 launch 参数。
 
 脚本流程：
 
-1. 重置 `var_data/live_variables.log`
-2. 检查 `/opt/ros/humble/setup.bash`
-3. 解析 ifname；状态非 `UP` 时尝试 `ip link set <if> up`
-4. `source /opt/ros/humble/setup.bash`
-5. `colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release`
-6. `source install/setup.bash`
-7. `exec ros2 launch linkx_bringup full_system.launch.py ifname:=... vehicle_prefix:=... ros_nodes_prefix:=...`
+1. 创建 `var_data/`，清空 `var_data/live_variables.log`，导出运行时数据路径。
+2. 检查 `/opt/ros/humble/setup.bash`。
+3. 检查 EtherCAT 网卡；状态不是 `UP` 时执行 `sudo ip link set <ifname> up`。
+4. `source /opt/ros/humble/setup.bash`。
+5. `colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release`。
+6. `source install/setup.bash`。
+7. 对真实主控二进制执行 `sudo setcap cap_net_raw,cap_net_admin=eip`。
+8. `exec ros2 launch linkx_bringup full_system.launch.py ifname:=<ifname>`。
 
-非 `--sudo` 模式下，脚本会用 `getcap` 检查可执行文件权限，发现缺 `cap_net_raw/cap_net_admin` 会提示。
-
-## 2. 包内脚本：`src/linkx_soem_demo/launch/run_link.sh`
-
-兼容旧习惯。位于包内便于单独打包；行为接近根脚本。
+## 2. 直接 launch
 
 ```bash
-bash src/linkx_soem_demo/launch/run_link.sh --sudo --ifname enp86s0
-```
-
-额外参数：
-
-- `--no-vehicle`：仅启动遥控链路，不跑车体主控
-
-注意：包内脚本默认网卡是 `enp3s0`（与根脚本不同），多数情况要显式带 `--ifname`。
-2026-05-18 起 `--max-speed` 已废，详见上节注。
-
-## 3. 直接 launch（最透明）
-
-```bash
+source /opt/ros/humble/setup.bash
+source install/setup.bash
 ros2 launch linkx_bringup full_system.launch.py \
-    ifname:=enp86s0 \
-    start_vehicle_control:=true \
-    vehicle_prefix:="sudo -E env LD_LIBRARY_PATH=$LD_LIBRARY_PATH ..." \
-    ros_nodes_prefix:=""
+  ifname:=enp86s0 \
+  serial_port:=/dev/rc_receiver \
+  start_vehicle_control:=true
 ```
 
-可选参数（见 `linkx_bringup/launch/full_system.launch.py`）：
+`full_system.launch.py` 参数：
 
 | 参数 | 默认值 | 用途 |
 | --- | --- | --- |
-| `ifname` | `enp86s0` | 网卡名 |
-| `start_vehicle_control` | `true` | 是否启动车体 |
-| `vehicle_prefix` | `""` | 车体进程前缀 |
-| `ros_nodes_prefix` | `""` | 全部 ROS 节点前缀 |
+| `ifname` | `enp86s0` | EtherCAT 网卡名，作为 `vehicle_control` 第一个命令行参数 |
+| `serial_port` | `/dev/rc_receiver` | FS-i6S iBus 串口 |
+| `start_vehicle_control` | `true` | 是否启动车体主控；`false` 时只跑遥控链路 |
+| `vehicle_prefix` | `""` | 给车体主控加命令前缀 |
+| `ros_nodes_prefix` | `""` | 给 ROS 节点加命令前缀 |
 
-> ⚠️ `max_speed` 不再是 launch 参数，唯一权威源在 `remote_node.cpp::declare_parameter`。
-> 运行时改用 `ros2 param set /remote_node max_speed <v>`。
+## 3. 只启动遥控链路
+
+```bash
+ros2 launch linkx_bringup teleop.launch.py serial_port:=/dev/rc_receiver
+```
+
+或使用全系统 launch 关闭车体：
+
+```bash
+ros2 launch linkx_bringup full_system.launch.py \
+  start_vehicle_control:=false \
+  serial_port:=/dev/rc_receiver
+```
+
+可用以下命令检查：
+
+```bash
+ros2 topic echo /cmd_vel
+ros2 topic echo /robot_buttons
+ros2 topic echo /remote_vra
+```
 
 ## 4. 权限模型
 
-二选一：
-
-**方案 A（推荐）：每次用 `--sudo`**
+EtherCAT 原始以太网需要 `cap_net_raw` 和 `cap_net_admin`。推荐使用根目录脚本，它会在每次构建后自动对真实二进制补 capability：
 
 ```bash
-./start_full_system.sh --sudo --ifname enp86s0
+./start_full_system.sh --ifname enp86s0
 ```
 
-**方案 B：给可执行文件加 capability（一次性）**
+手动授权：
 
 ```bash
 sudo setcap 'cap_net_raw,cap_net_admin+ep' \
-    install/linkx_soem_demo/lib/linkx_soem_demo/linkx_soem_demo
+  install/linkx_soem_demo/lib/linkx_soem_demo/linkx_soem_demo
 ```
 
-⚠️ 每次 `colcon build` 重装可执行文件后 capability 会**丢失**，需重新 `setcap`。
+注意：`colcon build` 重新安装可执行文件后 capability 可能丢失。
 
-## 5. 启动后的进程节点
+## 5. 启动后的节点
 
 | 节点 | 包 / 可执行 | 角色 |
 | --- | --- | --- |
-| `joy_node` | `joy` | 手柄事件 → `/joy` |
-| `remote_node` | `linkx_soem_demo/remote_node_cpp` | `/joy` → `/cmd_vel` + `/robot_buttons` |
-| `vehicle_control` | `linkx_soem_demo/linkx_soem_demo` | EtherCAT 主站 + 1ms 控制循环 |
+| `remote_node` | `linkx_soem_demo/remote_node_cpp` | FS-i6S iBus 串口 → `/cmd_vel`、`/robot_buttons`、`/remote_vra` |
+| `vehicle_control` | `linkx_soem_demo/linkx_soem_demo` | EtherCAT 主站、LinkX/CAN、全向轮底盘控制 |
 
-## 6. 编码器零点 / 累计值的两种启动场景
+当前不使用 `joy_node`，iBus 遥控链路不经过 `/joy`。
 
-### 场景 1：日常运行（已有零点 + 累计值）
+## 6. 遥控参数
+
+`remote_node_cpp` 默认参数在 `src/linkx_soem_demo/src/remote/FSI6S/remote_node.cpp` 中声明：
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `max_speed` | `0.5` | 最大平移速度 |
+| `max_omega` | `0.5` | 最大角速度 |
+| `deadzone` | `0.03` | 摇杆死区 |
+| `serial_port` | `/dev/rc_receiver` | iBus 串口路径 |
+| `rx_timeout_ms` | `200` | 超时后发布零速和零按键 |
+
+运行时临时调整示例：
 
 ```bash
-unset CAPTURE_STEER_ZERO
-unset CAPTURE_STEER_ZERO_FORCE
-./start_full_system.sh --sudo --ifname enp86s0
+ros2 param set /remote_node max_speed 0.3
+ros2 param set /remote_node max_omega 0.4
 ```
 
-### 场景 2：重新设置编码器零点
+## 7. 实时观察反馈
+
+仓库自带 `tools/plot_feedback_wave.py`，可从控制台日志中提取 `key=value` 波形：
 
 ```bash
-rm -f var_data/steer_unwrapped_pulses.txt   # 清掉旧累计值
-export CAPTURE_STEER_ZERO=1
-export CAPTURE_STEER_ZERO_FORCE=1
-./start_full_system.sh --sudo --ifname enp86s0
-```
-
-看到日志 `[TASK] steer zero calibration captured` 后停止，再正常运行。
-
-详见 [04_steer_encoder.md](04_steer_encoder.md)。
-
-## 7. 实时观察反馈波形
-
-仓库已自带 `tools/plot_feedback_wave.py`：
-
-**A. 直连方式**
-
-```bash
-./start_full_system.sh --sudo --ifname enp86s0 2>&1 | \
+./start_full_system.sh --ifname enp86s0 2>&1 | \
 python3 tools/plot_feedback_wave.py \
   --series now_vx --series now_vy --series now_omega \
   --height 18 --history 600 --refresh-hz 10
 ```
 
-观察某个编码器：
+也可分两个终端：
 
 ```bash
-... 2>&1 | python3 tools/plot_feedback_wave.py \
-  --series E0.wheel_rad --series E0.omega_rpm
-```
+# 终端 1
+./start_full_system.sh --ifname enp86s0 2>&1 | tee /tmp/r1_live.log
 
-**B. 二终端方式**
-
-```bash
-# 终端 1：
-./start_full_system.sh --sudo --ifname enp86s0 2>&1 | tee /tmp/r1_live.log
-
-# 终端 2：
+# 终端 2
 tail -f /tmp/r1_live.log | python3 tools/plot_feedback_wave.py --series now_vx
 ```
 
-常用参数：
+## 8. 当前主控底盘配置
 
-| 参数 | 用途 |
+主可执行 `linkx_soem_demo` 当前在 CMake 中链接：
+
+- `src/vehicle_control/3_Chariot/chassis/omni_wheel/crt_chassis.cpp`
+- `src/vehicle_control/2_Device/Motor/dvc_motor_dji.cpp`
+- `src/remote/FSI6S/dvc_fsi6s.cpp`
+- `src/remote/FSI6S/ibus_parser.cpp`
+
+CAN 通道约定：
+
+| 通道 | 用途 |
 | --- | --- |
-| `--series <key>` | 要绘制的字段，可重复 |
-| `--list-keys` | 打印当前所有字段名（先用这个找） |
-| `--csv <file>` | 同时保存采样数据到 CSV |
-| `--y-min / --y-max` | 固定纵轴范围 |
-| `--height` / `--history` / `--refresh-hz` | ASCII 高度 / 历史长度 / 刷新率 |
+| ch0 | 4 × DJI 3508 / C620，反馈 ID `0x201..0x204`，控制 ID `0x200` |
+| ch1 / ch2 | 当前全向轮主路径闲置；舵轮测试程序可能使用 |
+| ch3 | OPS-9 |
 
-## 8. 关键注意事项
+## 9. 安全注意事项
 
-- **网卡专用**：EtherCAT 网卡建议独立有线网卡，不要混跑普通业务。
-- **网卡链路**：必须 `UP` + `LOWER_UP`（有载波）。
-- **网卡名错** → EtherCAT 主站初始化失败。
-- **build/install/log** 是自动产物，异常时可清理后重编。
-- **优雅退出**：`Ctrl+C` 会触发信号处理，主循环跳出前会落盘累计值。
-
-## 9. 控制模式（2026-05-18）
-
-### 9.1 drive_mode 双档 profile
-
-底盘 `Class_Chassis::drive_mode_` 在两档间切换，影响舵向 slew 和 LPF：
-
-| profile | slew | LPF α | τ ≈ dt/α | 用途 |
-| --- | --- | --- | --- | --- |
-| `Drive_Mode_MANUAL` | 500 °/s | 0.30 | 6.7 ms | 手柄遥控（默认） |
-| `Drive_Mode_SEMI_AUTO` | 200 °/s | 0.15 | 13 ms | 路径跟随 / Auto_Pilot |
-
-切档由 `Class_Auto_Pilot::Start/Stop` 自动完成（`auto_pilot.cpp:152 / 189`）。手动模式
-下任何外部直接 `Set_Drive_Mode` 都会再被 auto_pilot 接管时改回。
-
-> 不要 fork 底盘代码做 manual / semi_auto 双实例，profile 切换是在同一底盘对象上完成的。
-
-环境变量覆盖（开发期调参，正式发布前回默认）：
-
-```bash
-STEER_SLEW_RATE_DEG_S=500    # MANUAL slew
-STEER_LPF_ALPHA=0.30         # MANUAL LPF α
-STEER_SLEW_RATE_DEG_S_SEMI=200
-STEER_LPF_ALPHA_SEMI=0.15
-```
-
-### 9.2 Auto_Pilot 拐角软化
-
-路径点之间过渡用 cos²(Δθ/2) + smoothstep 重写（`auto_pilot.cpp:283 起`）：
-
-- `V_corner = seg_speed × cos²(Δθ/2)`：直线全速、90° 半速、180° U-turn 停下转
-- 窗口 `L = clamp(L0 × Δθ/(π/2), Lmin, Lmax)`，`L0 = 220 mm`、`Lmin = 40 mm`
-- 进出曲线 smoothstep `3u² − 2u³`：边界 V′ = 0，无加速度阶跃
-- 方向 lerp 与速度共用同一 smoothstep 权重，避免方向先到位但速度还在拐角速→ steer 跟不上
-
-旧版的 blend + corner-slow 死锁分支已删，不要再加。
-
-### 9.3 手动模式航向纠偏已删
-
-`robot.cpp:347` 手动分支只有 cmd_omega 透传，**不接 OPS 纠偏**。三轮迭代后用户反馈
-「关纠偏比开纠偏好」。稳态 yaw 漂靠 `kWheelSpeedCalib[4]` 4 轮速度标定在底盘端
-吸收（见 [05_calibration.md](05_calibration.md) §5）。
-
-半自动 / Auto_Pilot 路径才走 OPS 横向 PID + 航向 PID。
-
-### 9.4 F710 trigger 速度缩放（XInput）
-
-`Class_LogF710::Resolve_Speed_Scale` (`dvc_logF710.cpp:124`)：
-
-```text
-lt = (1 - axes[2]) * 0.5    # LT 压下量 ∈ [0, 1]
-rt = (1 - axes[5]) * 0.5    # RT 压下量 ∈ [0, 1]
-scale = 0.65 + (rt - lt) * 0.35
-scale = clamp(scale, 0.30, 1.00)
-```
-
-- 不踩两键 → 0.65× 基线
-- 只踩 RT → 1.0× max_speed
-- 只踩 LT → 0.30× max_speed
-- 两键同时按 → 抵消，仍 0.65×
-
-DInput / 旧驱动下 `Resolve_Speed_Scale` 返回 1.0 透传，不缩放（避免误伤）。
-ABXY 按键在 XInput 下重映射为 `0=A, 1=B, 2=X, 3=Y`。
+- EtherCAT 网卡建议独立专用，不要混跑普通网络业务。
+- 启动车体主控前确认车体架空或现场具备急停条件。
+- `/dev/rc_receiver` 丢帧超过 `rx_timeout_ms` 后，遥控节点会发布一次零速和零按键。
+- `build/`、`install/`、`log/` 是自动产物，构建异常时可清理后重编。
+- `src/linkx_soem_demo/launch/run_link.sh` 是旧兼容脚本，可能与当前 launch 参数不同步；日常运行以根目录脚本为准。

@@ -23,9 +23,7 @@ sudo apt install python3-colcon-common-extensions
 ### 2.1 `Interface not found: enp86s0`
 ```bash
 ip -br link              # 列出实际网卡
-./start_full_system.sh --auto-ifname --sudo
-# 或显式指定：
-./start_full_system.sh --sudo --ifname <实际名字>
+./start_full_system.sh --ifname <实际名字>
 ```
 
 ### 2.2 网卡状态非 UP
@@ -42,15 +40,15 @@ sudo ip link set enp86s0 up
 顺序排查：
 1. 网卡名是否正确（`ip -br link`）
 2. 网卡是否 `UP` + `LOWER_UP`
-3. 是否有原始套接字权限（用 `--sudo` 或 `setcap`）
+3. 是否有原始套接字权限（根目录脚本会自动 `setcap`；也可手动 `setcap`）
 4. 网卡是否独占（不要混跑普通业务）
 
 ### 2.5 权限不足
 ```bash
-# 方案 A：用 sudo
-./start_full_system.sh --sudo --ifname enp86s0
+# 根目录脚本会自动补 capability
+./start_full_system.sh --ifname enp86s0
 
-# 方案 B：给可执行文件加 capability（每次重编后重做）
+# 或手动给可执行文件加 capability（每次重编后可能要重做）
 sudo setcap 'cap_net_raw,cap_net_admin+ep' \
     install/linkx_soem_demo/lib/linkx_soem_demo/linkx_soem_demo
 ```
@@ -99,7 +97,7 @@ SOEM 的 SDO timeout **单位是微秒**，不是毫秒。一律用 `EC_TIMEOUTR
   rm -f var_data/steer_unwrapped_pulses.txt
   export CAPTURE_STEER_ZERO=1
   export CAPTURE_STEER_ZERO_FORCE=1
-  ./start_full_system.sh --sudo --ifname enp86s0
+  ./start_full_system.sh --ifname enp86s0
   ```
 
 ### 4.3 `wheel_deg_true` 物理零位不是 0
@@ -142,35 +140,37 @@ WHEEL_OUTPUT_ACCEL=5 WHEEL_OUTPUT_DECEL=100 ./start_full_system.sh ...
 
 ## 5. 遥控链路
 
-### 5.1 手柄无响应
+### 5.1 FS-i6S 接收机无响应
 ```bash
-ros2 topic echo /joy             # 看是否有事件
-ls /dev/input/js*                # 看驱动是否识别
+ls -l /dev/rc_receiver
+ros2 launch linkx_bringup teleop.launch.py serial_port:=/dev/rc_receiver
 ```
 
 ### 5.2 `/cmd_vel` 没数据
 - 看 `remote_node_cpp` 是否启动
-- `--no-vehicle` 模式下也应有 `/cmd_vel`
-- 手柄死区参数：launch 默认 `deadzone=0.05`
+- `start_vehicle_control:=false` 模式下也应有 `/cmd_vel`
+- 检查串口路径是否与 launch 参数 `serial_port` 一致
+- 检查 `rx_timeout_ms` 是否因无合法 iBus 帧触发了零速安全态
 
-### 5.3 RT/LT trigger 不影响速度
-- 仅 XInput 布局（axes 数 ≥ 8）下生效；DInput / 旧驱动透传 1.0
-- `jstest /dev/input/js0` 看 LT/RT 是否落在 axes[2] / axes[5]
-- 静止时两键应输出 `+1.0`（未压），压到底 `-1.0`
-- 详细映射见 [03_run_guide.md §9.4](03_run_guide.md)
+### 5.3 速度/角速度不符合预期
+- `max_speed`、`max_omega`、`deadzone` 默认值在 `src/linkx_soem_demo/src/remote/FSI6S/remote_node.cpp`
+- 运行时可用 `ros2 param set /remote_node max_speed <v>` 临时调整
+- 如果串口失联，节点会发布零速，先确认 `/remote_vra` 是否持续更新
 
 ### 5.4 Auto_Pilot 拐角振荡
 - 不要靠加强**航向**纠偏吸横向偏置（会激发耦合振荡 → `omega·d` 反馈 + 40 Hz + 舵 slew）
 - 横向偏置用**横向 I** 吸收
 - 拐角软化已用 `cos²(Δθ/2)`，曲线靠 `kSoftL0Mm` 调；改前先想清楚 `Δθ/dt` 对 steer 的需求
 
-### 5.3 只想测遥控不上车
+### 5.5 只想测遥控不上车
 ```bash
-./start_full_system.sh --sudo --ifname enp86s0 \
-  ros2 launch linkx_bringup full_system.launch.py \
-    ifname:=enp86s0 start_vehicle_control:=false
-# 或
-bash src/linkx_soem_demo/launch/run_link.sh --no-vehicle
+ros2 launch linkx_bringup teleop.launch.py serial_port:=/dev/rc_receiver
+
+# 或使用 full_system launch，但不启动车体主控
+ros2 launch linkx_bringup full_system.launch.py \
+  ifname:=enp86s0 \
+  serial_port:=/dev/rc_receiver \
+  start_vehicle_control:=false
 ```
 
 ## 6. 常用日志关键字
@@ -188,8 +188,8 @@ bash src/linkx_soem_demo/launch/run_link.sh --no-vehicle
 
 | 我想做什么 | 用什么 |
 | --- | --- |
-| 跑日常 | `./start_full_system.sh --sudo --ifname enp86s0` |
-| 仅测遥控 | `--no-vehicle` 或 `start_vehicle_control:=false` |
+| 跑日常 | `./start_full_system.sh --ifname enp86s0` |
+| 仅测遥控 | `teleop.launch.py` 或 `start_vehicle_control:=false` |
 | 看实时波形 | `tools/plot_feedback_wave.py` |
 | ODrive 标定 | `odrive_calib --wheel <N> --test all` |
 | DM 电机标定 | `tools/run_motor_calib.sh <N>` |
@@ -202,6 +202,6 @@ bash src/linkx_soem_demo/launch/run_link.sh --no-vehicle
 | enc3 卡频抢救 | `enc3_recover` / `enc3_set_period` |
 | LinkX alias 写入 | `linkx_set_alias`（每次上电要重写） |
 | 4 轮速度标定调整 | 改 `crt_chassis.cpp:963` `kWheelSpeedCalib[4]` + rebuild |
-| 改最大遥控速度 | 改 `remote_node.cpp` `declare_parameter("max_speed", ...)` + rebuild |
+| 改最大遥控速度 | `ros2 param set /remote_node max_speed <v>`；默认值在 `remote/FSI6S/remote_node.cpp` |
 | 上机回归（限速短转） | `robot_test` |
 | 修复 var_data root 占用 | `sudo chown -R $USER:$USER var_data/` |

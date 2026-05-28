@@ -57,7 +57,7 @@ L = saved_pulses + diff
 rm -f var_data/steer_unwrapped_pulses.txt
 export CAPTURE_STEER_ZERO=1
 export CAPTURE_STEER_ZERO_FORCE=1
-./start_full_system.sh --sudo --ifname enp86s0
+./start_full_system.sh --ifname enp86s0
 ```
 
 4. 看到 `[TASK] steer zero calibration captured` 表示已写入：
@@ -70,7 +70,7 @@ export CAPTURE_STEER_ZERO_FORCE=1
 ```bash
 unset CAPTURE_STEER_ZERO
 unset CAPTURE_STEER_ZERO_FORCE
-./start_full_system.sh --sudo --ifname enp86s0
+./start_full_system.sh --ifname enp86s0
 ```
 
 ## 6. 持久化文件格式
