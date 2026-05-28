@@ -156,7 +156,7 @@ int main(int argc, char *argv[])
                 linkx_send_can(&linkx_fd, ch, kFDBaseId + ch,
                                /*canfd=*/true, /*brs=*/true, /*ext=*/false, /*rtr=*/false,
                                /*dlen=*/kFDPayloadLen,
-                               reinterpret_cast<uint32_t *>(fd_payload));
+                               fd_payload);
             }
         }
 

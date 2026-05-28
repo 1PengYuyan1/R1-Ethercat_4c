@@ -26,7 +26,7 @@ struct CapturedFrame
 
 static std::vector<CapturedFrame> g_tx;
 
-extern "C" void linkx_quick_can_send(linkx_t *, uint8_t ch, uint32_t id, uint8_t *data)
+extern "C" void linkx_quick_can_send(linkx_t *, uint8_t ch, uint32_t id, const uint8_t *data)
 {
     CapturedFrame f{};
     f.ch = ch;
@@ -35,8 +35,8 @@ extern "C" void linkx_quick_can_send(linkx_t *, uint8_t ch, uint32_t id, uint8_t
     g_tx.push_back(f);
 }
 
-extern "C" void linkx_quick_FDcan_send(linkx_t *, uint8_t, uint32_t, uint8_t *) {}
-extern "C" void linkx_quick_can_send_rtr(linkx_t *, uint8_t, uint32_t, uint8_t *) {}
+extern "C" void linkx_quick_FDcan_send(linkx_t *, uint8_t, uint32_t, const uint8_t *) {}
+extern "C" void linkx_quick_can_send_rtr(linkx_t *, uint8_t, uint32_t, const uint8_t *) {}
 
 #define EXPECT_EQ(a, b, label) do {                                                               \
     if ((a) != (b)) {                                                                             \

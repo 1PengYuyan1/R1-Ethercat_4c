@@ -2,12 +2,7 @@
 #include <stdio.h>
 #include "soem/soem.h"
 
-// 单帧 PDO 泵浦：sync 与 bring_online 的共同基础动作
-static inline void ecat_pump_pdo(ecat_master_t *master)
-{
-    ecx_send_processdata(&master->ctx);
-    ecx_receive_processdata(&master->ctx, EC_TIMEOUTRET);
-}
+#define ECAT_WKC_ERROR_LOG_PERIOD 100
 
 static void ecat_dump_slave_states(ecat_master_t *master)
 {
@@ -26,6 +21,14 @@ static void ecat_dump_slave_states(ecat_master_t *master)
 // 初始化网卡并扫描从站
 bool ecat_master_init(ecat_master_t *master, const char *ifname)
 {
+    if (!master || !ifname)
+        return false;
+
+    master->slave_count = 0;
+    master->expected_wkc = 0;
+    master->consecutive_wkc_errors = 0;
+    master->is_running = false;
+
     printf("[ECAT] Initializing adapter %s...\n", ifname);
     if (!ecx_init(&master->ctx, ifname))
     {
@@ -41,21 +44,14 @@ bool ecat_master_init(ecat_master_t *master, const char *ifname)
 
     printf("[ECAT] %d slaves found and configured.\n", master->ctx.slavecount);
 
-    // 运行时按物理位置分配 Station Alias（LinkX EEPROM 不持久化，每次启动设一次）
-    // slave[1] -> alias=1 (FD/夹爪), slave[2] -> alias=2 (经典/底盘)
-    for (int i = 1; i <= master->ctx.slavecount; i++)
-    {
-        master->ctx.slavelist[i].aliasadr = (uint16_t)i;
-        printf("[ECAT]   slave[%d] name='%s' vendor=0x%08X product=0x%08X alias=%u\n",
-               i,
-               master->ctx.slavelist[i].name,
-               master->ctx.slavelist[i].eep_man,
-               master->ctx.slavelist[i].eep_id,
-               master->ctx.slavelist[i].aliasadr);
-    }
-
     // 1. 映射 IO 数据 (告诉系统报文有多长)
     ecx_config_map_group(&master->ctx, master->iomap, 0);
+    master->expected_wkc = (master->ctx.grouplist[0].outputsWKC * 2) +
+                           master->ctx.grouplist[0].inputsWKC;
+    printf("[ECAT] Expected WKC=%d (outputs=%u inputs=%u)\n",
+           master->expected_wkc,
+           master->ctx.grouplist[0].outputsWKC,
+           master->ctx.grouplist[0].inputsWKC);
 
     // DC 核心功能 ：对表与计算延迟
     // 必须放在 IO 映射之后，状态机检查之前！
@@ -77,8 +73,9 @@ bool ecat_master_init(ecat_master_t *master, const char *ifname)
     int state = ecx_statecheck(&master->ctx, 0, EC_STATE_SAFE_OP, EC_TIMEOUTSTATE * 2);
     if (state != EC_STATE_SAFE_OP)
     {
-        printf("[WARN] Not all slaves reached SAFE_OP (state=0x%x)\n", state);
+        printf("[ERROR] Not all slaves reached SAFE_OP (state=0x%x)\n", state);
         ecat_dump_slave_states(master);
+        return false;
     }
 
     master->slave_count = master->ctx.slavecount;
@@ -87,9 +84,31 @@ bool ecat_master_init(ecat_master_t *master, const char *ifname)
 }
 
 // 核心同步：发送并接收过程数据
-void ecat_master_sync(ecat_master_t *master)
+int ecat_master_sync(ecat_master_t *master)
 {
-    ecat_pump_pdo(master);
+    if (!master)
+        return 0;
+
+    ecx_send_processdata(&master->ctx);
+    int wkc = ecx_receive_processdata(&master->ctx, EC_TIMEOUTRET);
+
+    if (master->expected_wkc > 0 && wkc < master->expected_wkc)
+    {
+        master->consecutive_wkc_errors++;
+        if (master->consecutive_wkc_errors == 1 ||
+            (master->consecutive_wkc_errors % ECAT_WKC_ERROR_LOG_PERIOD) == 0)
+        {
+            printf("[ECAT][WKC] wkc=%d expected=%d consecutive_errors=%d\n",
+                   wkc, master->expected_wkc, master->consecutive_wkc_errors);
+            ecat_dump_slave_states(master);
+        }
+    }
+    else
+    {
+        master->consecutive_wkc_errors = 0;
+    }
+
+    return wkc;
 }
 
 // 安全切换到 OP 状态（含看门狗预热逻辑）
@@ -100,7 +119,8 @@ bool ecat_master_bring_online(ecat_master_t *master)
     // 按 SOEM 推荐流程：先交换若干帧过程数据，避免 SAFE_OP->OP 时输出无效导致拒绝切换
     for (int i = 0; i < 5; i++)
     {
-        ecat_pump_pdo(master);
+        ecx_send_processdata(&master->ctx);
+        ecx_receive_processdata(&master->ctx, EC_TIMEOUTRET);
         osal_usleep(1000);
     }
 
@@ -110,7 +130,8 @@ bool ecat_master_bring_online(ecat_master_t *master)
     int chk = 40;
     do
     {
-        ecat_pump_pdo(master);
+        ecx_send_processdata(&master->ctx);
+        ecx_receive_processdata(&master->ctx, EC_TIMEOUTRET);
         osal_usleep(10000);
         ecx_statecheck(&master->ctx, 0, EC_STATE_OPERATIONAL, 50000);
     } while (chk-- && (master->ctx.slavelist[0].state != EC_STATE_OPERATIONAL));
