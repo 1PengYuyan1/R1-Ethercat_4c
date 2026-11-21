@@ -9,11 +9,16 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 
-# IDE
+# IDE & Editor backups
 .vscode/
 .idea/
 *.swp
 *.swo
+*~
+*.un~
+
+# Runtime logs
+var_data/
 
 # OS
 .DS_Store
